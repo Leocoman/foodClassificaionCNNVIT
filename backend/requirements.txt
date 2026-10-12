@@ -1,0 +1,11 @@
+
+fastapi
+uvicorn[standard]
+python-multipart
+pillow
+torch
+transformers
+safetensors
+pytest
+httpx
+
