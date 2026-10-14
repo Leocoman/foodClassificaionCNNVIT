@@ -105,3 +105,68 @@ async def predict(file: UploadFile = File(...)):
         "predictions": predictions,
         "inference_time_ms": round(inference_time_ms, 2),
     }
+
+from io import BytesIO
+
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from PIL import Image, UnidentifiedImageError
+
+from app.predictor import predictor
+
+
+app = FastAPI(
+    title="FoodVision Mobile API",
+    description="Classificação de alimentos com EfficientNet-B0",
+    version="1.0.0",
+)
+
+
+@app.get("/")
+def root():
+    return {
+        "message": "FoodVision Mobile API",
+        "docs": "/docs",
+    }
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "model": "efficientnet_b0",
+        "classes": len(predictor.class_names),
+    }
+
+
+@app.post("/predict")
+async def predict_food(file: UploadFile = File(...)):
+    if file.content_type and not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=415,
+            detail="O ficheiro enviado deve ser uma imagem.",
+        )
+
+    contents = await file.read()
+
+    if not contents:
+        raise HTTPException(
+            status_code=400,
+            detail="O ficheiro está vazio.",
+        )
+
+    try:
+        image = Image.open(BytesIO(contents))
+        image.load()
+    except (UnidentifiedImageError, OSError):
+        raise HTTPException(
+            status_code=400,
+            detail="Não foi possível ler a imagem.",
+        )
+
+    try:
+        return predictor.predict(image)
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Erro durante a previsão.",
+        )

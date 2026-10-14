@@ -1,90 +1,93 @@
 
+
 from pathlib import Path
 
 import torch
+import torch.nn as nn
 from PIL import Image
-from transformers import (
-    ViTForImageClassification,
-    ViTImageProcessor,
-)
+from torchvision import transforms
+from torchvision.models import efficientnet_b0
 
-MODEL_DIR = Path(__file__).resolve().parent.parent / "models"
+
+# Caminhos do projeto
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+MODEL_DIR = BACKEND_DIR / "models" / "efficientnet_b0"
+MODEL_PATH = MODEL_DIR / "efficientnet_b0_food10.pth"
+
+DEVICE = torch.device(
+    "cuda" if torch.cuda.is_available() else "cpu"
+)
 
 
 class FoodPredictor:
-    def __init__(self, model_dir: Path = MODEL_DIR):
-        self.model_dir = Path(model_dir)
-        self.model = None
-        self.processor = None
+    def __init__(self):
+        if not MODEL_PATH.exists():
+            raise FileNotFoundError(
+                f"Modelo não encontrado: {MODEL_PATH}"
+            )
 
-        self.device = torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
+        # Carregar o checkpoint exportado pelo notebook
+        checkpoint = torch.load(
+            MODEL_PATH,
+            map_location=DEVICE,
+            weights_only=True,
         )
 
-        self.load_model()
+        self.class_names = checkpoint["class_names"]
+        num_classes = checkpoint["num_classes"]
 
-    def load_model(self):
-        config_path = self.model_dir / "config.json"
+        # Reconstruir a arquitetura utilizada no treino
+        self.model = efficientnet_b0(weights=None)
 
-        if not config_path.exists():
-            return
-
-        self.processor = ViTImageProcessor.from_pretrained(
-            str(self.model_dir)
+        in_features = self.model.classifier[1].in_features
+        self.model.classifier[1] = nn.Linear(
+            in_features, num_classes
         )
 
-        self.model = ViTForImageClassification.from_pretrained(
-            str(self.model_dir)
-        )
-
-        self.model.to(self.device)
+        self.model.load_state_dict(checkpoint["state_dict"])
+        self.model.to(DEVICE)
         self.model.eval()
 
-    @property
-    def ready(self) -> bool:
-        return (
-            self.model is not None
-            and self.processor is not None
+        image_size = checkpoint.get("image_size", 224)
+        mean = checkpoint.get(
+            "mean", [0.485, 0.456, 0.406]
         )
+        std = checkpoint.get(
+            "std", [0.229, 0.224, 0.225]
+        )
+
+        self.transform = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(image_size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
 
     @torch.inference_mode()
     def predict(self, image: Image.Image, top_k: int = 3):
-        if not self.ready:
-            raise RuntimeError(
-                "O modelo ainda não foi treinado ou instalado."
-            )
-
         image = image.convert("RGB")
+        tensor = self.transform(image).unsqueeze(0).to(DEVICE)
 
-        inputs = self.processor(
-            images=image,
-            return_tensors="pt",
-        )
+        logits = self.model(tensor)
+        probabilities = torch.softmax(logits, dim=1)[0]
 
-        inputs = {
-            key: value.to(self.device)
-            for key, value in inputs.items()
-        }
-
-        logits = self.model(**inputs).logits
-        probabilities = torch.softmax(logits, dim=-1)[0]
-
-        k = min(top_k, probabilities.numel())
+        k = min(top_k, len(self.class_names))
         scores, indices = torch.topk(probabilities, k=k)
 
-        results = []
+        predictions = [
+            {
+                "class_name": self.class_names[index.item()],
+                "confidence": round(score.item(), 4),
+            }
+            for score, index in zip(scores, indices)
+        ]
 
-        for score, index in zip(
-            scores.tolist(),
-            indices.tolist(),
-        ):
-            label = self.model.config.id2label.get(
-                index, str(index)
-            )
+        return {
+            "predicted_class": predictions[0]["class_name"],
+            "confidence": predictions[0]["confidence"],
+            "top_predictions": predictions,
+        }
 
-            results.append({
-                "label": label,
-                "confidence": round(float(score), 6),
-            })
 
-        return results
+# Carregar o modelo uma única vez quando o módulo é inicializado
+predictor = FoodPredictor()
